@@ -6,11 +6,20 @@ import whois
 from datetime import datetime
 import streamlit as st
 
-# Keywords to identify parked domains by NS
+# Known parking-related keywords in name servers
 PARKING_KEYWORDS = [
     "parkingcrew", "sedoparking", "bodis", "afternic", "above", "uniregistry",
     "domaincontrol", "cashparking", "namebright", "namestore"
 ]
+
+HTTP_STATUS_DESCRIPTIONS = {
+    200: "OK",
+    301: "Moved Permanently",
+    302: "Found (Redirect)",
+    403: "Forbidden",
+    404: "Not Found",
+    500: "Internal Server Error"
+}
 
 # Get expiration date via WHOIS
 def get_expiration_date(domain):
@@ -25,17 +34,18 @@ def get_expiration_date(domain):
     except Exception:
         return "Lookup Failed"
 
-# Test domain HTTP(S) accessibility
-def check_website(domain):
+# Get HTTP status and description
+def check_http_status(domain):
     urls = [f"http://{domain}", f"https://{domain}"]
     for url in urls:
         try:
             response = requests.get(url, timeout=5)
-            if response.status_code < 400:
-                return "Accessible"
+            status = response.status_code
+            description = HTTP_STATUS_DESCRIPTIONS.get(status, "Other")
+            return f"{status} - {description}"
         except requests.RequestException:
             continue
-    return "Inaccessible"
+    return "No Response"
 
 # Get NS records
 def get_name_servers(domain):
@@ -45,33 +55,44 @@ def get_name_servers(domain):
     except Exception:
         return []
 
-# Check if NS points to parked domain
-def is_parking_ns(ns_records):
+# Detect if NS is a parking provider
+def check_if_parked(ns_records):
     return any(any(keyword in ns.lower() for keyword in PARKING_KEYWORDS) for ns in ns_records)
 
-# Process a single domain (modified for progress feedback)
-def process_single_domain(domain, check_expiry, check_ns, check_access):
-    result = {"Domain": domain}
+# Run selected checks on domain list
+def process_domains(domains, check_expiry, check_ns, check_park, check_http):
+    results = []
 
-    if check_access:
-        result["Status"] = check_website(domain)
-    else:
-        result["Status"] = "Skipped"
+    for domain in domains:
+        result = {"Domain": domain}
 
-    if check_ns:
-        ns_records = get_name_servers(domain)
-        result["Name Servers"] = ", ".join(ns_records) if ns_records else "N/A"
-        result["Possibly Parked"] = "Yes" if is_parking_ns(ns_records) else "No"
-    else:
-        result["Name Servers"] = "Skipped"
-        result["Possibly Parked"] = "Skipped"
+        if check_http:
+            result["HTTP Status"] = check_http_status(domain)
+        else:
+            result["HTTP Status"] = "Skipped"
 
-    if check_expiry:
-        result["Expiration Date"] = get_expiration_date(domain)
-    else:
-        result["Expiration Date"] = "Skipped"
+        if check_ns:
+            ns_records = get_name_servers(domain)
+            result["Name Servers"] = ", ".join(ns_records) if ns_records else "N/A"
+        else:
+            ns_records = []
+            result["Name Servers"] = "Skipped"
 
-    return result
+        if check_park and ns_records:
+            result["Possibly Parked"] = "Yes" if check_if_parked(ns_records) else "No"
+        elif check_park:
+            result["Possibly Parked"] = "N/A"
+        else:
+            result["Possibly Parked"] = "Skipped"
+
+        if check_expiry:
+            result["Expiration Date"] = get_expiration_date(domain)
+        else:
+            result["Expiration Date"] = "Skipped"
+
+        results.append(result)
+
+    return results
 
 # Streamlit UI
 def main():
@@ -80,9 +101,10 @@ def main():
 
     st.write("Select which checks to perform on each domain:")
 
-    check_ns = st.checkbox("🔁 Name Server + Parking Detection", value=True)
+    check_http = st.checkbox("🌍 HTTP Status Check", value=True)
+    check_ns = st.checkbox("🧾 Name Server Lookup", value=True)
+    check_park = st.checkbox("🚧 Parking Detection (from NS)", value=True)
     check_expiry = st.checkbox("📆 Expiration Date (WHOIS)", value=True)
-    check_access = st.checkbox("🌍 Website Accessibility", value=True)
 
     st.markdown("### ✍️ Enter domain names (one per line):")
     domain_input = st.text_area("Domains", height=200, placeholder="example.com\nmydomain.net")
@@ -93,20 +115,9 @@ def main():
             st.warning("Please input at least one domain.")
             return
 
-        progress_bar = st.progress(0, text="Initializing...")
-        results = []
-        total = len(domains)
-
-        for i, domain in enumerate(domains):
-            percent = int((i + 1) / total * 100)
-            progress_bar.progress(percent, text=f"Checking: {domain} ({percent}%)")
-
-            result = process_single_domain(domain, check_expiry, check_ns, check_access)
-            results.append(result)
-
-        progress_bar.empty()
-
-        df = pd.DataFrame(results)
+        with st.spinner("Checking domains..."):
+            results = process_domains(domains, check_expiry, check_ns, check_park, check_http)
+            df = pd.DataFrame(results)
 
         st.success("✅ Done!")
         st.dataframe(df)
